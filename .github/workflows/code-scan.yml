@@ -1,0 +1,80 @@
+name: Salesforce Code Analyzer Scan
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+jobs:
+  scan:
+    name: Static Code Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
+
+      - name: Verify Salesforce CLI
+        run: sf --version
+
+      - name: Install Code Analyzer plugin
+        run: echo y | sf plugins install @salesforce/sfdx-scanner
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      - name: Run scanner (JSON)
+        run: |
+          sf scanner run \
+            --target "force-app/" \
+            --format json \
+            --outfile reports/scan-results.json \
+            --engine pmd,eslint \
+            --normalize-severity \
+            || true
+
+      - name: Run scanner (HTML)
+        run: |
+          sf scanner run \
+            --target "force-app/" \
+            --format html \
+            --outfile reports/scan-results.html \
+            --engine pmd,eslint \
+            || true
+
+      - name: Run scanner (CSV)
+        run: |
+          sf scanner run \
+            --target "force-app/" \
+            --format csv \
+            --outfile reports/scan-results.csv \
+            --engine pmd,eslint \
+            || true
+
+      - name: Generate step summary
+        run: python3 scripts/summarize_scan.py reports/scan-results.json --top 10 >> $GITHUB_STEP_SUMMARY
+        if: always()
+
+      - name: Upload scan reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: code-scan-reports
+          path: reports/
+          retention-days: 30

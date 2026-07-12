@@ -1,0 +1,128 @@
+name: Fixes
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Number of Critical violations to fix: "all" or a positive integer (e.g. 10)'
+        required: false
+        default: '10'
+      base_branch:
+        description: 'Target branch for the fix PR'
+        required: false
+        default: 'develop'
+
+jobs:
+  ai-fix:
+    name: Deburger
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: pip install openai
+
+      - name: Download latest scan artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p reports
+          RUN_ID=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "code-scan.yml" \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            -q '.[0].databaseId')
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful code-scan run found. Please run Salesforce Code Analyzer Scan first."
+            exit 1
+          fi
+          echo "Downloading artifact from run $RUN_ID"
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "code-scan-reports" \
+            --dir "reports/"
+
+      - name: Run AI fix script
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ vars.AI_BASE_URL || 'https://integrate.api.nvidia.com/v1' }}
+          AI_MODEL: ${{ vars.AI_MODEL || 'meta/llama-3.1-8b-instruct' }}
+        run: |
+          python3 scripts/ai_fix.py \
+            --json reports/scan-results.json \
+            --batch "${{ github.event.inputs.batch_size }}" \
+            --severity 1
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet force-app/; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
+
+      - name: Verify Salesforce CLI
+        run: sf --version
+
+      - name: Install Code Analyzer plugin
+        run: echo y | sf plugins install @salesforce/sfdx-scanner
+
+      - name: Run post-fix scanner
+        run: |
+          sf scanner run \
+            --target "force-app/" \
+            --format json \
+            --outfile reports/scan-results-after.json \
+            --engine pmd,eslint \
+            --normalize-severity \
+            || true
+
+      - name: Generate job summary
+        if: always()
+        run: |
+          python3 scripts/ai_fix.py --summary reports/ai-fix-summary.json >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          python3 scripts/summarize_scan.py reports/scan-results-after.json --top 10 >> $GITHUB_STEP_SUMMARY
+
+      - name: Create branch and open PR
+        if: steps.check_changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="fix/ai-scan-$(date +%Y%m%d-%H%M%S)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add force-app/
+          git commit -m "fix: AI auto-fix Critical violations from Code Analyzer"
+          git push origin "$BRANCH"
+          gh pr create \
+            --base "${{ github.event.inputs.base_branch }}" \
+            --head "$BRANCH" \
+            --title "fix: AI auto-fix Critical violations from Code Analyzer" \
+            --body "$(python3 scripts/ai_fix.py --pr-body reports/ai-fix-summary.json)"
+
+      - name: No changes notice
+        if: steps.check_changes.outputs.changed == 'false'
+        run: echo "No Critical violations were fixed. No PR created."

@@ -1,0 +1,33 @@
+name: Deploy to Production
+
+on:
+  push:
+    tags:
+      - 'release-*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: npm install -g @salesforce/cli
+
+      - name: Authenticate to Prod Org
+        run: |
+          echo "${{ secrets.SF_AUTH_URL_PROD }}" > auth_url.txt
+          sf org login sfdx-url --sfdx-url-file auth_url.txt --alias prod-org
+          rm auth_url.txt
+
+      - name: Deploy
+        run: |
+          sf project deploy start \
+            --manifest manifest/package.xml \
+            --target-org prod-org \
+            --test-level RunLocalTests
+
+      - name: Cleanup
+        if: always()
+        run: sf org logout --target-org prod-org --no-prompt

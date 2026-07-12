@@ -1,0 +1,31 @@
+name: Deploy to Dev
+
+on:
+  push:
+    branches: [develop]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: npm install -g @salesforce/cli
+
+      - name: Authenticate to Dev Org
+        run: |
+          echo "${{ secrets.SF_AUTH_URL_DEV }}" > auth_url.txt
+          sf org login sfdx-url --sfdx-url-file auth_url.txt --alias dev-org
+          rm auth_url.txt
+
+      - name: Deploy
+        run: |
+          sf project deploy start \
+            --manifest manifest/package.xml \
+            --target-org dev-org \
+            --test-level NoTestRun
+
+      - name: Cleanup
+        if: always()
+        run: sf org logout --target-org dev-org --no-prompt

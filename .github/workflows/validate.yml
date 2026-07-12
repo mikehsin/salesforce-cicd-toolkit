@@ -1,0 +1,43 @@
+name: Validate PR
+
+on:
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: 'Apex test level for the dry-run validation'
+        required: false
+        default: 'RunLocalTests'
+        type: choice
+        options:
+          - RunLocalTests
+          - RunAllTestsInOrg
+          - NoTestRun
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: npm install -g @salesforce/cli
+
+      - name: Authenticate to Dev Org
+        run: |
+          echo "${{ secrets.SF_AUTH_URL }}" > auth_url.txt
+          sf org login sfdx-url --sfdx-url-file auth_url.txt --alias validate-org
+          rm auth_url.txt
+
+      - name: Validate Deployment (Check Only)
+        run: |
+          sf project deploy start \
+            --manifest manifest/package.xml \
+            --target-org validate-org \
+            --dry-run \
+            --test-level "${{ github.event.inputs.test_level || 'RunLocalTests' }}"
+
+      - name: Cleanup
+        if: always()
+        run: sf org logout --target-org validate-org --no-prompt
